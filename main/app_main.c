@@ -147,8 +147,70 @@ void app_main(void)
         //received data from the master. Print it.
         printf("Received: %s\n", recvbuf);
         n++;
+        motorMove(1000,1500,1200,3000);
+
     }
 
+}
+
+class Pulser
+{
+
+    long highTime; // micoseconds of HIGH
+    long lowTime; // microseconds of LOW
+
+    int serPin;    
+    int startState;    
+                        
+  public:
+  unsigned long previousMicro; // last time servo updated
+  
+  public:
+  Pulser(int pin, long high, long low)
+  {
+    serPin = pin;
+    pinMode(serPin, OUTPUT);     
+          
+    highTime = high;
+    lowTime = low;
+        
+    startState = LOW; 
+    previousMicro = 0;
+  }
+     
+  void Update()
+  {
+    unsigned long currentMicro = micros();
+         
+    if((startState == HIGH) && (currentMicro - previousMicro >= highTime))
+    {
+      previousMicro = currentMicro;  
+      digitalWrite(serPin, startState);
+      startState = LOW;  
+
+    }
+    else if ((startState == LOW) && (currentMicro - previousMicro >= lowTime))
+    {
+      previousMicro = currentMicro;
+      digitalWrite(serPin, startState);
+      startState = HIGH;
+
+    }
+  }
+};
+//Setting pins and speeds
+Pulser Pulser1(6, 5, 5);
+Pulser Pulser2(5, 5, 5);
+
+void motorMove(int mot1, int mot2, int mot3, int mot4){
+    unsigned long currentMicro = micros();
+
+    if(currentMicro - Pulser1.previousMicro >= mot1){
+        Pulser1.Update();
+    }
+    if(currentMicro - Pulser2.previousMicro >= mot2){
+        Pulser2.Update();
+    }
 }
 
 
