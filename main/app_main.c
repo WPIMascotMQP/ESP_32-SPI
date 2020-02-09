@@ -202,7 +202,7 @@ class Pulser
 Pulser Pulser1(6, 5, 5);
 Pulser Pulser2(5, 5, 5);
 
-void motorMove(int mot1, int mot2, int mot3, int mot4){
+void motorMove(unsigned long mot1, unsigned long mot2, unsigned long mot3, unsigned long mot4){
     unsigned long currentMicro = micros();
 
     if(currentMicro - Pulser1.previousMicro >= mot1){
