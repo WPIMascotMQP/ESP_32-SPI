@@ -65,6 +65,11 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 
 #endif
 
+bool dir1;
+bool dir2;
+int currentstep1 = 0;
+int currentstep2 = 0;
+
 
 
 //Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
@@ -165,8 +170,6 @@ class Pulser
 
   public:
   unsigned long previousMicro; // last time servo updated
-  public:
-  int currentstep = 0;
   
   public:
   Pulser(int spin, int dPin, long high, long low)
@@ -192,8 +195,6 @@ class Pulser
       previousMicro = currentMicro;  
       digitalWrite(serPin, startState);
       startState = LOW; 
-      currentstep = currentstep + 1; 
-
     }
     else if ((startState == LOW) && (currentMicro - previousMicro >= lowTime))
     {
@@ -209,29 +210,47 @@ Pulser Pulser1(6, 7, 5, 5);
 Pulser Pulser2(5, 8, 5, 5);
 
 void motorMove(unsigned long mot1, unsigned long mot2, unsigned long mot3, unsigned long mot4){ 
-    if(currentstep<mot1){
+
+  
+    if(currentstep1<mot1){        
         digitalWrite(Pulser1.dirPin, HIGH);
+        dir1 = true;
     }
-    else if(currentstep>mot1){
+    else if(currentstep1>mot1){
         digitalWrite(Pulser1.dirPin, LOW);
+        dir1 = false;
     }
-    if(currentstep<mot2){
+    if(currentstep2<mot2){
         digitalWrite(Pulser2.dirPin, HIGH);
+        dir2 = true;
     }
-    else if(currentstep>mot2){
+    else if(currentstep2>mot2){
         digitalWrite(Pulser2.dirPin, LOW);
+        dir2 = false;
     }
 
-    if(Pulser1.currentstep != mot1){
+    if(currentstep1 != mot1){
         Pulser1.Update();
         Pulser1.Update();
+        
+        if(dir1 == true){
+          currentstep1 = currentstep1 - 1;}
+        if(dir1 == false){
+          currentstep1 = currentstep1 + 1;}
+  
     }
-    if(Pulser2.currentstep != mot2){
+    if(currentstep2 != mot2){
         Pulser2.Update();
         Pulser2.Update();
+        
+        
+        if(dir2 == true){
+          currentstep2 = currentstep2 - 1;}
+        if(dir2 == false){
+          currentstep2 = currentstep2 + 1;}
+        
     }
 }
-
 void rpmToMicroDelay(){
     int StepRate = 12800;
     int rpm = 10;
