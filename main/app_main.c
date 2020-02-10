@@ -160,16 +160,21 @@ class Pulser
     long lowTime; // microseconds of LOW
 
     int serPin;    
-    int startState;    
-                        
+    int startState;  
+    int dirPin;  
+
   public:
   unsigned long previousMicro; // last time servo updated
+  public:
+  int currentstep = 0;
   
   public:
-  Pulser(int pin, long high, long low)
+  Pulser(int spin, int dPin, long high, long low)
   {
-    serPin = pin;
-    pinMode(serPin, OUTPUT);     
+    serPin = spin;
+    pinMode(serPin, OUTPUT);
+    dirPin = dPin;     
+    pinMode(dirPin, OUTPUT);
           
     highTime = high;
     lowTime = low;
@@ -186,7 +191,8 @@ class Pulser
     {
       previousMicro = currentMicro;  
       digitalWrite(serPin, startState);
-      startState = LOW;  
+      startState = LOW; 
+      currentstep = currentstep + 1; 
 
     }
     else if ((startState == LOW) && (currentMicro - previousMicro >= lowTime))
@@ -199,18 +205,41 @@ class Pulser
   }
 };
 //Setting pins and speeds
-Pulser Pulser1(6, 5, 5);
-Pulser Pulser2(5, 5, 5);
+Pulser Pulser1(6, 7, 5, 5);
+Pulser Pulser2(5, 8, 5, 5);
 
-void motorMove(unsigned long mot1, unsigned long mot2, unsigned long mot3, unsigned long mot4){
-    unsigned long currentMicro = micros();
+void motorMove(unsigned long mot1, unsigned long mot2, unsigned long mot3, unsigned long mot4){ 
+    if(currentstep<mot1){
+        digitalWrite(Pulser1.dirPin, HIGH);
+    }
+    else if(currentstep>mot1){
+        digitalWrite(Pulser1.dirPin, LOW);
+    }
+    if(currentstep<mot2){
+        digitalWrite(Pulser2.dirPin, HIGH);
+    }
+    else if(currentstep>mot2){
+        digitalWrite(Pulser2.dirPin, LOW);
+    }
 
-    if(currentMicro - Pulser1.previousMicro >= mot1){
+    if(Pulser1.currentstep != mot1){
+        Pulser1.Update();
         Pulser1.Update();
     }
-    if(currentMicro - Pulser2.previousMicro >= mot2){
+    if(Pulser2.currentstep != mot2){
+        Pulser2.Update();
         Pulser2.Update();
     }
 }
 
+void rpmToMicroDelay(){
+    int StepRate = 12800;
+    int rpm = 10;
+    unsigned long HighTimeCalc = (StepRate * (60/rpm) * (10^6)) - 5; 
+}
+
+void radToStep(){
+ int rad;
+ int turns = (rad/2*M_PI)/12800;
+}
 
