@@ -138,21 +138,21 @@ void app_main(void)
       char flagInArry[8] = "00000000";
       unsigned char flag = 0;
       for ( bits = 0; bits < 8; ++bits )
-          flag |= (num[bits] == '1') << (7 - bits);
+          flag |= (flagInArry[bits] == '1') << (7 - bits);
        
       char cmdInArry[8] = "11111111";
       unsigned char cmd = 0;
       for ( bits = 0; bits < 8; ++bits )
-          cmd |= (num[bits] == '1') << (7 - bits);
+          cmd |= (cmdInArry[bits] == '1') << (7 - bits);
        
        char dataInArry[128];
        unsigned char data[16];
        int dataByts;
-       for(dataByts; dataByts < 16; ++dataByts){
-         for ( bits = 0; bits < 8; ++bits ){
-            result[dataByts] |= (num[bits] == '1') << (7 - bits);
-         }
-       }
+       //for(dataByts; dataByts < 16; ++dataByts){
+       //  for ( bits = 0; bits < 8; ++bits ){
+       //     data[dataByts] |= (dataInArry[bits] == '1') << (7 - bits);
+       //  }
+       // }
        
          
         sprintf(sendbuf, "Moved");
