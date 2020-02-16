@@ -125,16 +125,37 @@ void app_main(void)
     ret=spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, DMA_CHAN);
     assert(ret==ESP_OK);
 
-    WORD_ALIGNED_ATTR char sendbuf[5]="";
-    WORD_ALIGNED_ATTR char recvbuf[5]="";
-    memset(recvbuf, 0, 5);
+    WORD_ALIGNED_ATTR char sendbuf[8]="";
+    WORD_ALIGNED_ATTR char recvbuf[8]="";
+    memset(recvbuf, 0, 8);
     spi_slave_transaction_t t;
     memset(&t, 0, sizeof(t));
 
     while(1) {
         //Clear receive buffer, set send buffer to something sane
-        memset(recvbuf, 0x0, 5);
-        sprintf(sendbuf, "a");
+        memset(recvbuf, 0x0, 8);
+      int bits;
+      char flagInArry[8] = "00000000";
+      unsigned char flag = 0;
+      for ( bits = 0; bits < 8; ++bits )
+          flag |= (num[bits] == '1') << (7 - bits);
+       
+      char cmdInArry[8] = "11111111";
+      unsigned char cmd = 0;
+      for ( bits = 0; bits < 8; ++bits )
+          cmd |= (num[bits] == '1') << (7 - bits);
+       
+       char dataInArry[128];
+       unsigned char data[16];
+       int dataByts;
+       for(dataByts; dataByts < 16; ++dataByts){
+         for ( bits = 0; bits < 8; ++bits ){
+            result[dataByts] |= (num[bits] == '1') << (7 - bits);
+         }
+       }
+       
+         
+        sprintf(sendbuf, "Moved");
 
         //Set up a transaction of 128 bytes to send/receive
         t.length=5*8;
@@ -152,7 +173,7 @@ void app_main(void)
         //received data from the master. Print it.
         printf("Received: %s\n", recvbuf);
         n++;
-        motorMove(1000,1500,1200,3000);
+        //motorMove(1000,1500,1200,3000);
 
     }
 
