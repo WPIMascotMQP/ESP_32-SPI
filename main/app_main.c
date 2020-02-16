@@ -134,6 +134,7 @@ void app_main(void)
     while(1) {
         //Clear receive buffer, set send buffer to something sane
         memset(recvbuf, 0x0, 8);
+      //Add defines for array sizes
       int bits;
       char flagInArry[8] = "00000000";
       unsigned char flag = 0;
