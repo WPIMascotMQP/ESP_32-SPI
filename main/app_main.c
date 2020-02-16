@@ -124,7 +124,7 @@ void app_main(void)
     //Initialize SPI slave interface
     ret=spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, DMA_CHAN);
     assert(ret==ESP_OK);
-
+    //https://www.quora.com/What-is-word-Alignment
     WORD_ALIGNED_ATTR char sendbuf[8]="";
     WORD_ALIGNED_ATTR char recvbuf[8]="";
     memset(recvbuf, 0, 8);
