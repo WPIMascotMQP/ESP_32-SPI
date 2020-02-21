@@ -111,6 +111,19 @@ void my_post_trans_cb(spi_slave_transaction_t *trans) {
     WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1<<GPIO_HANDSHAKE));
 }
 
+void handleCommand(char* buffer);
+bool findCommand(char* buffer);
+
+size_t overwriteBytes(char* buffer, size_t byte_start, char* buf, size_t inc_start, size_t byte_inc);
+size_t encodePattern(char* buffer, size_t byte_start);
+size_t encodeInt16(char* buffer, size_t byte_start, int16_t num);
+size_t encodeInt32(char* buffer, size_t byte_start, int32_t num);
+size_t encodeFloat(char* buffer, size_t byte_start, float num);
+
+int16_t decodeInt16(char* buffer, size_t byte_start);
+int32_t decodeInt32(char* buffer, size_t byte_start);
+float decodeFloat(char* buffer, size_t byte_start);
+
 //Main application
 void app_main(void)
 {
@@ -180,15 +193,13 @@ void app_main(void)
 
         //spi_slave_transmit does not return until the master has done a transmission, so by here we have sent our data and
         //received data from the master. Print it.
-        printf("Received: %s\n", getStringHex(recvbuf, BUFFER_SIZE));
+        printf("Received: %s\n", recvbuf);
         n++;
 
-  			// TEST IF COMPLETE
-  			if(findCommand(recvbuf)) {
-  				recievings.at(i) = false;
-  				handleCommand(recvbuf);
-  				delete(buffer);
-  			}
+		// TEST IF COMPLETE
+		if(findCommand(recvbuf)) {
+			handleCommand(recvbuf);
+		}
 
         //motorMove(1000,1500,1200,3000);
 
@@ -196,6 +207,7 @@ void app_main(void)
 
 }
 
+/*
 class Pulser
 {
 
@@ -243,6 +255,7 @@ class Pulser
     }
   }
 };
+
 //Setting pins and speeds
 Pulser Pulser1(6, 7, 5, 5);
 Pulser Pulser2(5, 8, 5, 5);
@@ -298,47 +311,22 @@ void rpmToMicroDelay(){
 void radToStep(){
  int rad;
  int turns = (rad/2*M_PI)/12800;
-}
+}*/
 
 /**
  Handles the command in the given buffer
  @param buffer The buffer where the command is (must start at beginning of buffer)
  */
-void SerialProcessor::handleCommand(WORD_ALIGNED_ATTR char buffer) {
-  printf("Received Command: %s\n", getStringHex(buffer, BUFFER_SIZE));
+void handleCommand(char* buffer) {
+  printf("Received Command: %s\n", buffer);
 	if(buffer[cmd_byte] == MOTORPOSITION) {
 		// If command is the current motor position
 		size_t current_byte = 2;
 		int index = (int) decodeInt16(buffer, current_byte);
 		current_byte += 2;
 		double radians = (double) decodeFloat(buffer, current_byte);
-		processor::mp.addRadiansHistory(index, radians);
-
-		std::ostringstream strs;
-		strs << radians;
-		std::ostringstream strsIndex;
-		strsIndex << index;
-		logger::log("SerialProcessor", "Recieved Motor Radians", strsIndex.str(), strs.str());
+		printf("Received: %d %f\n", index, radians);
 	}
-}
-
-/**
- Gets the std::string represention of the given buffer
- @param buffer The given buffer to represent
- @param length The length of the buffer to represent
- @return The std::string hex value
- */
-std::string getStringHex(WORD_ALIGNED_ATTR char buffer, size_t length) {
-	char hex[length * 2 + 1];
-	for(size_t i = 0; i < length; i++) {
-   		sprintf(hex + 2 * i, "%.2x", buffer[i]);
-	}
-	hex[length * 2 + 1] = '\0';
-
-	char output[length * 2 + 1];
-	sprintf(output, "0x%s", hex);
-	std::string s(output);
-	return s;
 }
 
 /**
@@ -347,7 +335,7 @@ std::string getStringHex(WORD_ALIGNED_ATTR char buffer, size_t length) {
  @param buffer
  @return Whether a command was found or not
  */
-bool SerialProcessor::findCommand(WORD_ALIGNED_ATTR char buffer) {
+bool findCommand(char* buffer) {
 	WORD_ALIGNED_ATTR char buf[BUFFER_SIZE];
 	overwriteBytes(buf, 0, buffer, 0, BUFFER_SIZE);
 
@@ -355,11 +343,11 @@ bool SerialProcessor::findCommand(WORD_ALIGNED_ATTR char buffer) {
 	size_t lengths[2];
 	size_t start_bypte = 0;
 	size_t counter = 0;
-  size_t current = 0;
+  	size_t current = 0;
 	bool on_one = false;
 
 	// Parse throught each byte in the buffer
-	for(size_t i = 0; i < serial::buffer_size; i++) {
+	for(size_t i = 0; i < BUFFER_SIZE; i++) {
 		// If found pattern byte
 		if(buffer[i] == PATTERN) {
 			// If not on pattern yet
@@ -373,7 +361,7 @@ bool SerialProcessor::findCommand(WORD_ALIGNED_ATTR char buffer) {
 			}
 		} else {
 			// If on one but less length or longer than pattern length
-			if(on_one && (counter < serial::PATTERN_LEN || counter > PATTERN_LEN)) {
+			if(on_one && (counter < PATTERN_LEN || counter > PATTERN_LEN)) {
 				start_bypte = 0;
 				counter = 0;
 				on_one = false;
@@ -385,20 +373,18 @@ bool SerialProcessor::findCommand(WORD_ALIGNED_ATTR char buffer) {
 				start_bypte = 0;
 				counter = 0;
 				on_one = false;
-        current++;
-        if(current > 1) {
-          return false;
-        }
+		        current++;
+		        if(current > 2) {
+		          return false;
+		        }
 			}
 		}
 	}
-	if(patterns.size() == 2) {
+	if(current == 2) {
 		overwriteBytes(buffer, 0, buf, patterns[0] + lengths[0],
 			patterns[1] - patterns[0] - lengths[0]);
-		delete(buf);
 		return true;
 	}
-	delete(buf);
 	return false;
 }
 
@@ -411,8 +397,8 @@ bool SerialProcessor::findCommand(WORD_ALIGNED_ATTR char buffer) {
  @param byte_inc The number of bytes to write
  @return The number of bytes written
 */
-size_t overwriteBytes(WORD_ALIGNED_ATTR char buffer, size_t byte_start,
-  WORD_ALIGNED_ATTR char buf, size_t inc_start, size_t byte_inc) {
+size_t overwriteBytes(char* buffer, size_t byte_start,
+  char* buf, size_t inc_start, size_t byte_inc) {
 	for(size_t i = 0; i < byte_inc; i++) {
 		buffer[byte_start + i] = buf[inc_start + i];
 	}
@@ -425,7 +411,7 @@ size_t overwriteBytes(WORD_ALIGNED_ATTR char buffer, size_t byte_start,
  @param byte_start The starting byte to writing into
  @return The number of bytes written
  */
-size_t encodePattern(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
+size_t encodePattern(char* buffer, size_t byte_start) {
 	buffer[byte_start + 0] = PATTERN;
 	buffer[byte_start + 1] = PATTERN;
 	buffer[byte_start + 2] = PATTERN;
@@ -436,7 +422,7 @@ size_t encodePattern(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
 	buffer[byte_start + 7] = PATTERN;
 	buffer[byte_start + 8] = PATTERN;
 	buffer[byte_start + 9] = PATTERN;
-	return serial::pattern_len;
+	return PATTERN_LEN;
 }
 
 /**
@@ -446,7 +432,7 @@ size_t encodePattern(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
  @param num The 16 bit int to encode
  @return The number of bytes encoded
  */
-size_t encodeInt16(WORD_ALIGNED_ATTR char buffer, size_t byte_start, int16_t num) {
+size_t encodeInt16(char* buffer, size_t byte_start, int16_t num) {
 	buffer[byte_start + 0] = (num >> 8) & 0xFF;
 	buffer[byte_start + 1] = num & 0xFF;
 	return sizeof(int16_t);
@@ -459,7 +445,7 @@ size_t encodeInt16(WORD_ALIGNED_ATTR char buffer, size_t byte_start, int16_t num
  @param num The 32 bit int to encode
  @return The number of bytes encoded
  */
-size_t encodeInt32(WORD_ALIGNED_ATTR char buffer, size_t byte_start, int32_t num) {
+size_t encodeInt32(char* buffer, size_t byte_start, int32_t num) {
 	buffer[byte_start + 0] = (num >> 24) & 0xFF;
 	buffer[byte_start + 1] = (num >> 16) & 0xFF;
 	buffer[byte_start + 2] = (num >> 8) & 0xFF;
@@ -474,7 +460,7 @@ size_t encodeInt32(WORD_ALIGNED_ATTR char buffer, size_t byte_start, int32_t num
  @param num The 32 bit float to encode
  @return The number of bytes encoded
  */
-size_t encodeFloat(WORD_ALIGNED_ATTR char buffer, size_t byte_start, float num) {
+size_t encodeFloat(char* buffer, size_t byte_start, float num) {
 	float_i number = *(float_i*) &num;
 	buffer[byte_start + 0] = (number >> 24) & 0xFF;
 	buffer[byte_start + 1] = (number >> 16) & 0xFF;
@@ -489,7 +475,7 @@ size_t encodeFloat(WORD_ALIGNED_ATTR char buffer, size_t byte_start, float num) 
  @param byte_start The starting byte to read from
  @return The 16 bit int decoded
  */
-int16_t decodeInt16(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
+int16_t decodeInt16(char* buffer, size_t byte_start) {
 	unsigned char buf[2];
 	buf[0] = buffer[byte_start + 1];
 	buf[1] = buffer[byte_start + 0];
@@ -504,7 +490,7 @@ int16_t decodeInt16(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
  @param byte_start The starting byte to read from
  @return The 32 bit int decoded
  */
-int32_t decodeInt32(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
+int32_t decodeInt32(char* buffer, size_t byte_start) {
 	unsigned char buf[4];
 	buf[0] = buffer[byte_start + 3];
 	buf[1] = buffer[byte_start + 2];
@@ -521,7 +507,7 @@ int32_t decodeInt32(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
  @param byte_start The starting byte to read from
  @return The float decoded
  */
-float decodeFloat(WORD_ALIGNED_ATTR char buffer, size_t byte_start) {
+float decodeFloat(char* buffer, size_t byte_start) {
 	unsigned char buf[4];
 	buf[0] = buffer[byte_start + 3];
 	buf[1] = buffer[byte_start + 2];
