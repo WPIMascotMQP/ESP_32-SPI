@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -113,6 +114,7 @@ void my_post_trans_cb(spi_slave_transaction_t *trans) {
 
 void handleCommand(char* buffer);
 bool findCommand(char* buffer);
+char* getStringHex(char* buffer, char* output, size_t length);
 
 size_t overwriteBytes(char* buffer, size_t byte_start, char* buf, size_t inc_start, size_t byte_inc);
 size_t encodePattern(char* buffer, size_t byte_start);
@@ -167,22 +169,37 @@ void app_main(void)
     ret=spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, DMA_CHAN);
     assert(ret==ESP_OK);
     //https://www.quora.com/What-is-word-Alignment
-    WORD_ALIGNED_ATTR char sendbuf[BUFFER_SIZE] = "";
-    WORD_ALIGNED_ATTR char recvbuf[BUFFER_SIZE] = "";
-    memset(recvbuf, 0, BUFFER_SIZE);
+	WORD_ALIGNED_ATTR char sendbuf[BUFFER_SIZE] = "";
+	WORD_ALIGNED_ATTR char recvbuf[BUFFER_SIZE] = "";
+    memset(recvbuf, 0x00, BUFFER_SIZE);
     spi_slave_transaction_t t;
     memset(&t, 0, sizeof(t));
 
+	srand(time(NULL));
     while(1) {
         //Clear receive buffer, set send buffer to something sane
-        memset(recvbuf, 0x0, BUFFER_SIZE);
+		WORD_ALIGNED_ATTR char outputbuf[BUFFER_SIZE] = "";
 
-        sprintf(sendbuf, "Moved");
+        memset(recvbuf, 0x00, BUFFER_SIZE);
+		memset(sendbuf, 0x00, BUFFER_SIZE);
+
+		size_t current_byte = 0;
+		current_byte += encodePattern(sendbuf, current_byte);
+		sendbuf[current_byte++] = 0x00;
+		sendbuf[current_byte++] = MOTORPOSITION;
+		int index = rand() % 20;
+		float radians = (rand() % 500000) + (0.0 + rand() % 100 / 100000);
+		current_byte += encodeInt16(sendbuf, current_byte, index);
+        current_byte += encodeFloat(sendbuf, current_byte, radians);
+        current_byte += encodePattern(sendbuf, current_byte);
+
+		printf("Sending Position: %d %f\n", index, radians);
+		printf("Sending: %s\n", getStringHex(sendbuf, outputbuf, BUFFER_SIZE));
 
         //Set up a transaction of 128 bytes to send/receive
-        t.length=5*8;
-        t.tx_buffer=sendbuf;
-        t.rx_buffer=recvbuf;
+        t.length = BUFFER_SIZE * 8;
+        t.tx_buffer = sendbuf;
+        t.rx_buffer = recvbuf;
         /* This call enables the SPI slave interface to send/receive to the sendbuf and recvbuf. The transaction is
         initialized by the SPI master, however, so it will not actually happen until the master starts a hardware transaction
         by pulling CS low and pulsing the clock etc. In this specific example, we use the handshake line, pulled up by the
@@ -193,14 +210,13 @@ void app_main(void)
 
         //spi_slave_transmit does not return until the master has done a transmission, so by here we have sent our data and
         //received data from the master. Print it.
-        printf("Received: %s\n", recvbuf);
+        printf("Received: %s\n", getStringHex(recvbuf, outputbuf, BUFFER_SIZE));
         n++;
 
 		// TEST IF COMPLETE
 		if(findCommand(recvbuf)) {
 			handleCommand(recvbuf);
 		}
-
         //motorMove(1000,1500,1200,3000);
 
     }
@@ -318,14 +334,15 @@ void radToStep(){
  @param buffer The buffer where the command is (must start at beginning of buffer)
  */
 void handleCommand(char* buffer) {
-  printf("Received Command: %s\n", buffer);
+	WORD_ALIGNED_ATTR char outputbuf[BUFFER_SIZE] = "";
+  	//printf("Received Command: %s\n", getStringHex(buffer, outputbuf, BUFFER_SIZE));
 	if(buffer[cmd_byte] == MOTORPOSITION) {
 		// If command is the current motor position
 		size_t current_byte = 2;
 		int index = (int) decodeInt16(buffer, current_byte);
 		current_byte += 2;
 		double radians = (double) decodeFloat(buffer, current_byte);
-		printf("Received: %d %f\n", index, radians);
+		printf("Received Motor Radians: %d %f\n", index, radians);
 	}
 }
 
@@ -386,6 +403,23 @@ bool findCommand(char* buffer) {
 		return true;
 	}
 	return false;
+}
+
+/**
+ Gets the std::string represention of the given buffer
+ @param buffer The given buffer to represent
+ @param length The length of the buffer to represent
+ @return The std::string hex value
+ */
+char* getStringHex(char* buffer, char* output, size_t length) {
+	WORD_ALIGNED_ATTR char hex[length * 2 + 1];
+	for(size_t i = 0; i < length; i++) {
+   		sprintf(hex + 2 * i, "%.2x", buffer[i]);
+	}
+	hex[length * 2 + 1] = '\0';
+
+	sprintf(output, "0x%s", hex);
+	return output;
 }
 
 /**
@@ -476,7 +510,7 @@ size_t encodeFloat(char* buffer, size_t byte_start, float num) {
  @return The 16 bit int decoded
  */
 int16_t decodeInt16(char* buffer, size_t byte_start) {
-	unsigned char buf[2];
+	WORD_ALIGNED_ATTR char buf[2];
 	buf[0] = buffer[byte_start + 1];
 	buf[1] = buffer[byte_start + 0];
 	int16_t number = *(int16_t*) &buf;
@@ -491,7 +525,7 @@ int16_t decodeInt16(char* buffer, size_t byte_start) {
  @return The 32 bit int decoded
  */
 int32_t decodeInt32(char* buffer, size_t byte_start) {
-	unsigned char buf[4];
+	WORD_ALIGNED_ATTR char buf[4];
 	buf[0] = buffer[byte_start + 3];
 	buf[1] = buffer[byte_start + 2];
 	buf[2] = buffer[byte_start + 1];
@@ -508,7 +542,7 @@ int32_t decodeInt32(char* buffer, size_t byte_start) {
  @return The float decoded
  */
 float decodeFloat(char* buffer, size_t byte_start) {
-	unsigned char buf[4];
+	WORD_ALIGNED_ATTR char buf[4];
 	buf[0] = buffer[byte_start + 3];
 	buf[1] = buffer[byte_start + 2];
 	buf[2] = buffer[byte_start + 1];
