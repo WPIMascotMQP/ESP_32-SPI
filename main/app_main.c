@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -30,10 +31,8 @@
 #include "driver/spi_slave.h"
 #include "esp_log.h"
 #include "esp_spi_flash.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
-
-
-
 
 /*
 SPI receiver (slave) example.
@@ -69,6 +68,10 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 
 #endif
 
+#define STEP_DELAY 1000
+#define LOW 0
+#define HIGH 1
+
 // Immediate variable type between float and long
 typedef long float_i;
 
@@ -88,7 +91,6 @@ enum flags {
 enum cmds {
 	PATTERN = 0xFF,
 	MOTORPOSITION = 0x01,
-
 };
 
 // Holds the byte index for different parts of the commmand
@@ -112,9 +114,13 @@ void my_post_trans_cb(spi_slave_transaction_t *trans) {
     WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1<<GPIO_HANDSHAKE));
 }
 
+
+// Function Declarations
 void handleCommand(char* buffer);
 bool findCommand(char* buffer);
 char* getStringHex(char* buffer, char* output, size_t length);
+
+static void doStep(void* arg);
 
 size_t overwriteBytes(char* buffer, size_t byte_start, char* buf, size_t inc_start, size_t byte_inc);
 size_t encodePattern(char* buffer, size_t byte_start);
@@ -126,10 +132,19 @@ int16_t decodeInt16(char* buffer, size_t byte_start);
 int32_t decodeInt32(char* buffer, size_t byte_start);
 float decodeFloat(char* buffer, size_t byte_start);
 
+// Global Varaibles
+DMA_ATTR int64_t counter = 0;
+
+DMA_ATTR int64_t motor_positions[5];
+DMA_ATTR int64_t motor_setpoints[5];
+
+DMA_ATTR gpio_num_t STEP = GPIO_NUM_25;
+DMA_ATTR gpio_num_t DIR = GPIO_NUM_33;
+DMA_ATTR gpio_num_t ENA = GPIO_NUM_27;
+
 //Main application
 void app_main(void)
 {
-    int n=0;
     esp_err_t ret;
 
     //Configuration for the SPI bus
@@ -152,18 +167,38 @@ void app_main(void)
     };
 
     //Configuration for the handshake line
-    gpio_config_t io_conf={
-        .intr_type=GPIO_INTR_DISABLE,
-        .mode=GPIO_MODE_OUTPUT,
-        .pin_bit_mask=(1<<GPIO_HANDSHAKE)
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_PIN_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = ((1ULL << DIR) | (1ULL << STEP)),
+		.pull_down_en = 0,
+		.pull_up_en = 0
     };
 
     //Configure handshake line as output
     gpio_config(&io_conf);
-    //Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
+
+	//Enable pull-ups on SPI lines so we don't detect rogue pulses when no master is connected.
     gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
+
+	gpio_pad_select_gpio(STEP);
+	gpio_set_direction(STEP, GPIO_MODE_OUTPUT);
+
+	gpio_pad_select_gpio(DIR);
+	gpio_set_direction(DIR, GPIO_MODE_OUTPUT);
+
+	const esp_timer_create_args_t timer_args = {
+            .callback = &doStep,
+            /* name is optional, but may help identify the timer when debugging */
+            .name = "periodic"
+    };
+	esp_timer_handle_t timer;
+	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer));
+	ESP_ERROR_CHECK(esp_timer_start_periodic(timer, STEP_DELAY));
+
+	counter = 0;
 
     //Initialize SPI slave interface
     ret=spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, DMA_CHAN);
@@ -176,6 +211,12 @@ void app_main(void)
     memset(&t, 0, sizeof(t));
 
 	srand(time(NULL));
+
+	for (int i = 0; i < 5; ++i) {
+           ESP_ERROR_CHECK(esp_timer_dump(stdout));
+           usleep(2000000);
+    }
+
     while(1) {
         //Clear receive buffer, set send buffer to something sane
 		WORD_ALIGNED_ATTR char outputbuf[BUFFER_SIZE] = "";
@@ -188,7 +229,7 @@ void app_main(void)
 		sendbuf[current_byte++] = 0x00;
 		sendbuf[current_byte++] = MOTORPOSITION;
 		int index = rand() % 20;
-		float radians = (rand() % 500000) + (0.0 + rand() % 100 / 100000);
+		float radians = (rand() % 12800) + ((0.0 + rand() % 100) / 100000);
 		current_byte += encodeInt16(sendbuf, current_byte, index);
         current_byte += encodeFloat(sendbuf, current_byte, radians);
         current_byte += encodePattern(sendbuf, current_byte);
@@ -206,135 +247,28 @@ void app_main(void)
         .post_setup_cb callback that is called as soon as a transaction is ready, to let the master know it is free to transfer
         data.
         */
-        ret=spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+        ret = spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
 
         //spi_slave_transmit does not return until the master has done a transmission, so by here we have sent our data and
         //received data from the master. Print it.
         printf("Received: %s\n", getStringHex(recvbuf, outputbuf, BUFFER_SIZE));
-        n++;
 
 		// TEST IF COMPLETE
 		if(findCommand(recvbuf)) {
 			handleCommand(recvbuf);
 		}
         //motorMove(1000,1500,1200,3000);
-
     }
+	esp_timer_delete(timer);
 
 }
-
-/*
-class Pulser
-{
-
-    long highTime; // micoseconds of HIGH
-    long lowTime; // microseconds of LOW
-
-    int serPin;
-    int startState;
-    int dirPin;
-
-  public:
-  unsigned long previousMicro; // last time servo updated
-
-  public:
-  Pulser(int spin, int dPin, long high, long low)
-  {
-    serPin = spin;
-    pinMode(serPin, OUTPUT);
-    dirPin = dPin;
-    pinMode(dirPin, OUTPUT);
-
-    highTime = high;
-    lowTime = low;
-
-    startState = LOW;
-    previousMicro = 0;
-  }
-
-  void Update()
-  {
-    unsigned long currentMicro = micros();
-
-    if((startState == HIGH) && (currentMicro - previousMicro >= highTime))
-    {
-      previousMicro = currentMicro;
-      digitalWrite(serPin, startState);
-      startState = LOW;
-    }
-    else if ((startState == LOW) && (currentMicro - previousMicro >= lowTime))
-    {
-      previousMicro = currentMicro;
-      digitalWrite(serPin, startState);
-      startState = HIGH;
-
-    }
-  }
-};
-
-//Setting pins and speeds
-Pulser Pulser1(6, 7, 5, 5);
-Pulser Pulser2(5, 8, 5, 5);
-
-void motorMove(unsigned long mot1, unsigned long mot2, unsigned long mot3, unsigned long mot4){
-
-
-    if(currentstep1<mot1){
-        digitalWrite(Pulser1.dirPin, HIGH);
-        dir1 = true;
-    }
-    else if(currentstep1>mot1){
-        digitalWrite(Pulser1.dirPin, LOW);
-        dir1 = false;
-    }
-    if(currentstep2<mot2){
-        digitalWrite(Pulser2.dirPin, HIGH);
-        dir2 = true;
-    }
-    else if(currentstep2>mot2){
-        digitalWrite(Pulser2.dirPin, LOW);
-        dir2 = false;
-    }
-
-    if(currentstep1 != mot1){
-        Pulser1.Update();
-        Pulser1.Update();
-
-        if(dir1 == true){
-          currentstep1 = currentstep1 - 1;}
-        if(dir1 == false){
-          currentstep1 = currentstep1 + 1;}
-
-    }
-    if(currentstep2 != mot2){
-        Pulser2.Update();
-        Pulser2.Update();
-
-
-        if(dir2 == true){
-          currentstep2 = currentstep2 - 1;}
-        if(dir2 == false){
-          currentstep2 = currentstep2 + 1;}
-
-    }
-}
-void rpmToMicroDelay(){
-    int StepRate = 12800;
-    int rpm = 10;
-    unsigned long HighTimeCalc = (StepRate * (60/rpm) * (10^6)) - 5;
-}
-
-void radToStep(){
- int rad;
- int turns = (rad/2*M_PI)/12800;
-}*/
 
 /**
  Handles the command in the given buffer
  @param buffer The buffer where the command is (must start at beginning of buffer)
  */
 void handleCommand(char* buffer) {
-	WORD_ALIGNED_ATTR char outputbuf[BUFFER_SIZE] = "";
+	//WORD_ALIGNED_ATTR char outputbuf[BUFFER_SIZE] = "";
   	//printf("Received Command: %s\n", getStringHex(buffer, outputbuf, BUFFER_SIZE));
 	if(buffer[cmd_byte] == MOTORPOSITION) {
 		// If command is the current motor position
@@ -342,8 +276,23 @@ void handleCommand(char* buffer) {
 		int index = (int) decodeInt16(buffer, current_byte);
 		current_byte += 2;
 		double radians = (double) decodeFloat(buffer, current_byte);
+		int steps = (int) radians;
 		printf("Received Motor Radians: %d %f\n", index, radians);
+		motor_setpoints[index] = steps;
 	}
+}
+
+static void doStep(void* arg) {
+	counter++;
+	if (motor_positions[0] > motor_setpoints[0]){
+		gpio_set_level(DIR, LOW);
+		gpio_set_level(STEP, counter % 2);
+		motor_positions[0] -= 1;
+ 	} else if (motor_positions[0] < motor_setpoints[0]){
+		gpio_set_level(DIR, HIGH);
+		gpio_set_level(STEP, counter % 2);
+		motor_positions[0] += 1;
+    }
 }
 
 /**
