@@ -6,6 +6,7 @@
    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
    CONDITIONS OF ANY KIND, either express or implied.
 */
+#include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -55,7 +56,6 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 #define GPIO_SCLK 15
 #define GPIO_CS 14
 
-#define BUFFER_SIZE 64
 #define PATTERN_LEN 10
 
 #ifdef CONFIG_IDF_TARGET_ESP32
@@ -68,7 +68,7 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 
 #endif
 
-#define STEP_DELAY 1000
+#define STEP_DELAY 55
 #define LOW 0
 #define HIGH 1
 
@@ -133,14 +133,23 @@ int32_t decodeInt32(char* buffer, size_t byte_start);
 float decodeFloat(char* buffer, size_t byte_start);
 
 // Global Varaibles
-DMA_ATTR int64_t counter = 0;
+DMA_ATTR static uint8_t BUFFER_SIZE = 64;
+DMA_ATTR static int64_t ACC_MAX = 10;
+
+DMA_ATTR int64_t stepper = 0;
+DMA_ATTR int64_t acceleration = 0;
 
 DMA_ATTR int64_t motor_positions[5];
 DMA_ATTR int64_t motor_setpoints[5];
+DMA_ATTR int64_t motor_differents[5];
 
 DMA_ATTR gpio_num_t STEP = GPIO_NUM_25;
 DMA_ATTR gpio_num_t DIR = GPIO_NUM_33;
 DMA_ATTR gpio_num_t ENA = GPIO_NUM_27;
+
+DMA_ATTR char sendbuf[65] = "";
+DMA_ATTR char recvbuf[65] = "";
+DMA_ATTR char outputbuf[65] = "";
 
 //Main application
 void app_main(void)
@@ -198,29 +207,21 @@ void app_main(void)
 	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer));
 	ESP_ERROR_CHECK(esp_timer_start_periodic(timer, STEP_DELAY));
 
-	counter = 0;
+	stepper = 0;
+	acceleration = 1;
 
     //Initialize SPI slave interface
     ret=spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, DMA_CHAN);
     assert(ret==ESP_OK);
     //https://www.quora.com/What-is-word-Alignment
-	WORD_ALIGNED_ATTR char sendbuf[BUFFER_SIZE] = "";
-	WORD_ALIGNED_ATTR char recvbuf[BUFFER_SIZE] = "";
     memset(recvbuf, 0x00, BUFFER_SIZE);
     spi_slave_transaction_t t;
     memset(&t, 0, sizeof(t));
 
 	srand(time(NULL));
 
-	for (int i = 0; i < 5; ++i) {
-           ESP_ERROR_CHECK(esp_timer_dump(stdout));
-           usleep(2000000);
-    }
-
     while(1) {
         //Clear receive buffer, set send buffer to something sane
-		WORD_ALIGNED_ATTR char outputbuf[BUFFER_SIZE] = "";
-
         memset(recvbuf, 0x00, BUFFER_SIZE);
 		memset(sendbuf, 0x00, BUFFER_SIZE);
 
@@ -251,7 +252,7 @@ void app_main(void)
 
         //spi_slave_transmit does not return until the master has done a transmission, so by here we have sent our data and
         //received data from the master. Print it.
-        printf("Received: %s\n", getStringHex(recvbuf, outputbuf, BUFFER_SIZE));
+        //printf("Received: %s\n", getStringHex(recvbuf, outputbuf, BUFFER_SIZE));
 
 		// TEST IF COMPLETE
 		if(findCommand(recvbuf)) {
@@ -279,20 +280,40 @@ void handleCommand(char* buffer) {
 		int steps = (int) radians;
 		printf("Received Motor Radians: %d %f\n", index, radians);
 		motor_setpoints[index] = steps;
+		motor_differents[index] = abs(motor_setpoints[index] - motor_positions[index]);
 	}
 }
 
 static void doStep(void* arg) {
-	counter++;
-	if (motor_positions[0] > motor_setpoints[0]){
-		gpio_set_level(DIR, LOW);
-		gpio_set_level(STEP, counter % 2);
-		motor_positions[0] -= 1;
- 	} else if (motor_positions[0] < motor_setpoints[0]){
-		gpio_set_level(DIR, HIGH);
-		gpio_set_level(STEP, counter % 2);
-		motor_positions[0] += 1;
-    }
+	int index = 0;
+	if(acceleration != 0 && motor_positions[index] != motor_setpoints[index]) {
+		stepper++;
+		if (motor_positions[index] > motor_setpoints[index]){
+			gpio_set_level(DIR, LOW);
+			gpio_set_level(STEP, stepper % 2);
+			if(stepper % 2) {
+				motor_positions[index] -= 1;
+			}
+	 	} else if (motor_positions[index] < motor_setpoints[index]){
+			gpio_set_level(DIR, HIGH);
+			gpio_set_level(STEP, stepper % 2);
+			if(stepper % 2) {
+				motor_positions[index] += 1;
+			}
+	    }
+		acceleration--;
+	} else if(motor_positions[index] != motor_setpoints[index]) {
+		int64_t difference = abs(motor_setpoints[index] - motor_positions[index]);
+		if(difference <= motor_differents[index] / 2) {
+			float ratio = (0.0 + difference) / (motor_differents[index] / 2);
+			acceleration = round(ratio * ACC_MAX + 0.5);
+		} else {
+			float ratio = (0.0 + difference - (motor_differents[index] / 2)) / (motor_differents[index] / 2);
+			acceleration = round(ACC_MAX - (ratio * ACC_MAX) + 0.5);
+		}
+	} else {
+	   gpio_set_level(STEP, LOW);
+   }
 }
 
 /**
@@ -302,6 +323,8 @@ static void doStep(void* arg) {
  @return Whether a command was found or not
  */
 bool findCommand(char* buffer) {
+	//printf("Buffer: %s\n", getStringHex(buffer, outputbuf, BUFFER_SIZE));
+
 	WORD_ALIGNED_ATTR char buf[BUFFER_SIZE];
 	overwriteBytes(buf, 0, buffer, 0, BUFFER_SIZE);
 
@@ -346,6 +369,7 @@ bool findCommand(char* buffer) {
 			}
 		}
 	}
+	printf("%d\n", current);
 	if(current == 2) {
 		overwriteBytes(buffer, 0, buf, patterns[0] + lengths[0],
 			patterns[1] - patterns[0] - lengths[0]);
