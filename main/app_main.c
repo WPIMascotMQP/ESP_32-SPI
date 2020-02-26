@@ -68,7 +68,7 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 
 #endif
 
-#define STEP_DELAY 55
+#define STEP_DELAY 75
 #define LOW 0
 #define HIGH 1
 
@@ -134,18 +134,18 @@ float decodeFloat(char* buffer, size_t byte_start);
 
 // Global Varaibles
 DMA_ATTR static uint8_t BUFFER_SIZE = 64;
-DMA_ATTR static int64_t ACC_MAX = 10;
+DMA_ATTR static int64_t ACC_MAX = 5;
+DMA_ATTR static uint8_t MOTOR_NUM = 4;
 
 DMA_ATTR int64_t stepper = 0;
 DMA_ATTR int64_t acceleration = 0;
 
-DMA_ATTR int64_t motor_positions[5];
-DMA_ATTR int64_t motor_setpoints[5];
-DMA_ATTR int64_t motor_differents[5];
+DMA_ATTR int64_t motor_positions[4];
+DMA_ATTR int64_t motor_setpoints[4];
+DMA_ATTR int64_t motor_differents[4];
 
-DMA_ATTR gpio_num_t STEP = GPIO_NUM_25;
-DMA_ATTR gpio_num_t DIR = GPIO_NUM_33;
-DMA_ATTR gpio_num_t ENA = GPIO_NUM_27;
+DMA_ATTR gpio_num_t STEPS[4] = {GPIO_NUM_32, GPIO_NUM_25, GPIO_NUM_5, GPIO_NUM_16};
+DMA_ATTR gpio_num_t DIRS[4] = {GPIO_NUM_33, GPIO_NUM_33, GPIO_NUM_17, GPIO_NUM_4};
 
 DMA_ATTR char sendbuf[65] = "";
 DMA_ATTR char recvbuf[65] = "";
@@ -179,7 +179,8 @@ void app_main(void)
     gpio_config_t io_conf = {
         .intr_type = GPIO_PIN_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = ((1ULL << DIR) | (1ULL << STEP)),
+        .pin_bit_mask = ((1ULL << GPIO_NUM_32) | (1ULL << GPIO_NUM_25) | (1ULL << GPIO_NUM_5) | (1ULL << GPIO_NUM_16)
+			| (1ULL << GPIO_NUM_33) | (1ULL << GPIO_NUM_26) | (1ULL << GPIO_NUM_17) | (1ULL << GPIO_NUM_4)),
 		.pull_down_en = 0,
 		.pull_up_en = 0
     };
@@ -192,11 +193,13 @@ void app_main(void)
     gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
 
-	gpio_pad_select_gpio(STEP);
-	gpio_set_direction(STEP, GPIO_MODE_OUTPUT);
+	for(int i = 0; i < MOTOR_NUM; i++) {
+		gpio_pad_select_gpio(STEPS[i]);
+		gpio_set_direction(STEPS[i], GPIO_MODE_OUTPUT);
 
-	gpio_pad_select_gpio(DIR);
-	gpio_set_direction(DIR, GPIO_MODE_OUTPUT);
+		gpio_pad_select_gpio(DIRS[i]);
+		gpio_set_direction(DIRS[i], GPIO_MODE_OUTPUT);
+	}
 
 	const esp_timer_create_args_t timer_args = {
             .callback = &doStep,
@@ -285,34 +288,35 @@ void handleCommand(char* buffer) {
 }
 
 static void doStep(void* arg) {
-	int index = 0;
-	if(acceleration != 0 && motor_positions[index] != motor_setpoints[index]) {
-		stepper++;
-		if (motor_positions[index] > motor_setpoints[index]){
-			gpio_set_level(DIR, LOW);
-			gpio_set_level(STEP, stepper % 2);
-			if(stepper % 2) {
-				motor_positions[index] -= 1;
+	for(int index = 0; index < MOTOR_NUM; index++) {
+		if(acceleration != 0 && motor_positions[index] != motor_setpoints[index]) {
+			stepper++;
+			if (motor_positions[index] > motor_setpoints[index]){
+				gpio_set_level(DIRS[index], LOW);
+				gpio_set_level(STEPS[index], stepper % 2);
+				if(stepper % 2) {
+					motor_positions[index] -= 1;
+				}
+		 	} else if (motor_positions[index] < motor_setpoints[index]){
+				gpio_set_level(DIRS[index], HIGH);
+				gpio_set_level(STEPS[index], stepper % 2);
+				if(stepper % 2) {
+					motor_positions[index] += 1;
+				}
+		    }
+			acceleration--;
+		} else if(motor_positions[index] != motor_setpoints[index]) {
+			int64_t difference = abs(motor_setpoints[index] - motor_positions[index]);
+			if(difference <= motor_differents[index] / 2) {
+				float ratio = (0.0 + difference) / (motor_differents[index] / 2);
+				acceleration = round(ratio * ACC_MAX + 0.5);
+			} else {
+				float ratio = (0.0 + difference - (motor_differents[index] / 2)) / (motor_differents[index] / 2);
+				acceleration = round(ACC_MAX - (ratio * ACC_MAX) + 0.5);
 			}
-	 	} else if (motor_positions[index] < motor_setpoints[index]){
-			gpio_set_level(DIR, HIGH);
-			gpio_set_level(STEP, stepper % 2);
-			if(stepper % 2) {
-				motor_positions[index] += 1;
-			}
-	    }
-		acceleration--;
-	} else if(motor_positions[index] != motor_setpoints[index]) {
-		int64_t difference = abs(motor_setpoints[index] - motor_positions[index]);
-		if(difference <= motor_differents[index] / 2) {
-			float ratio = (0.0 + difference) / (motor_differents[index] / 2);
-			acceleration = round(ratio * ACC_MAX + 0.5);
 		} else {
-			float ratio = (0.0 + difference - (motor_differents[index] / 2)) / (motor_differents[index] / 2);
-			acceleration = round(ACC_MAX - (ratio * ACC_MAX) + 0.5);
-		}
-	} else {
-	   gpio_set_level(STEP, LOW);
+		   gpio_set_level(STEPS[index], LOW);
+	   }
    }
 }
 
