@@ -32,8 +32,8 @@
 #include "driver/spi_slave.h"
 #include "esp_log.h"
 #include "esp_spi_flash.h"
-#include "esp_timer.h"
 #include "driver/gpio.h"
+#include "driver/rmt.h"
 
 /*
 SPI receiver (slave) example.
@@ -71,6 +71,7 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 #define STEP_DELAY 75
 #define LOW 0
 #define HIGH 1
+#define STEPS_PER_ROTATION 6400
 
 // Immediate variable type between float and long
 typedef long float_i;
@@ -116,11 +117,14 @@ void my_post_trans_cb(spi_slave_transaction_t *trans) {
 
 
 // Function Declarations
+void setupRMT();
+
 void handleCommand(char* buffer);
 bool findCommand(char* buffer);
 char* getStringHex(char* buffer, char* output, size_t length);
 
-static void doStep(void* arg);
+void handleENA(void* index);
+void overwriteItems(rmt_item32_t* pulses, size_t start, rmt_item32_t* pulses_inc, size_t inc_start, size_t steps);
 
 size_t overwriteBytes(char* buffer, size_t byte_start, char* buf, size_t inc_start, size_t byte_inc);
 size_t encodePattern(char* buffer, size_t byte_start);
@@ -134,11 +138,7 @@ float decodeFloat(char* buffer, size_t byte_start);
 
 // Global Varaibles
 DMA_ATTR static uint8_t BUFFER_SIZE = 64;
-DMA_ATTR static int64_t ACC_MAX = 5;
 DMA_ATTR static uint8_t MOTOR_NUM = 4;
-
-DMA_ATTR int64_t stepper = 0;
-DMA_ATTR int64_t acceleration = 0;
 
 DMA_ATTR int64_t motor_positions[4];
 DMA_ATTR int64_t motor_setpoints[4];
@@ -146,6 +146,20 @@ DMA_ATTR int64_t motor_differents[4];
 
 DMA_ATTR gpio_num_t STEPS[4] = {GPIO_NUM_32, GPIO_NUM_25, GPIO_NUM_5, GPIO_NUM_16};
 DMA_ATTR gpio_num_t DIRS[4] = {GPIO_NUM_33, GPIO_NUM_33, GPIO_NUM_17, GPIO_NUM_4};
+DMA_ATTR gpio_num_t ENAS[4] = {GPIO_NUM_33, GPIO_NUM_33, GPIO_NUM_17, GPIO_NUM_4};
+
+static int64_t MAX_STEPS = STEPS_PER_ROTATION * 10;
+static int64_t DELAY_MIN = 300;
+static int64_t DELAY_MAX = 500;
+static int64_t ACCELERATION = 2; // Steps per microsec
+static int64_t RAMP_SIZE = 400; //(DELAY_MAX - DELAY_MIN) * ACCELERATION;
+
+rmt_item32_t ramp_up_pulses[400];
+rmt_item32_t ramp_down_pulses[400];
+rmt_item32_t pulses[STEPS_PER_ROTATION * 5];
+rmt_item32_t full_pulses[1];
+rmt_item32_t empty_pulses[1];
+rmt_channel_t rmt_channels[4] = {RMT_CHANNEL_0, RMT_CHANNEL_1, RMT_CHANNEL_2, RMT_CHANNEL_3};
 
 DMA_ATTR char sendbuf[65] = "";
 DMA_ATTR char recvbuf[65] = "";
@@ -179,8 +193,9 @@ void app_main(void)
     gpio_config_t io_conf = {
         .intr_type = GPIO_PIN_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = ((1ULL << GPIO_NUM_32) | (1ULL << GPIO_NUM_25) | (1ULL << GPIO_NUM_5) | (1ULL << GPIO_NUM_16)
-			| (1ULL << GPIO_NUM_33) | (1ULL << GPIO_NUM_26) | (1ULL << GPIO_NUM_17) | (1ULL << GPIO_NUM_4)),
+        .pin_bit_mask = ((1ULL << STEPS[0]) | (1ULL << STEPS[1]) | (1ULL << STEPS[2]) | (1ULL << STEPS[3])
+			| (1ULL << DIRS[0]) | (1ULL << DIRS[1]) | (1ULL << DIRS[2]) | (1ULL << DIRS[3])
+			| (1ULL << ENAS[0]) | (1ULL << ENAS[1]) | (1ULL << ENAS[2]) | (1ULL << ENAS[3])),
 		.pull_down_en = 0,
 		.pull_up_en = 0
     };
@@ -199,19 +214,12 @@ void app_main(void)
 
 		gpio_pad_select_gpio(DIRS[i]);
 		gpio_set_direction(DIRS[i], GPIO_MODE_OUTPUT);
+
+		gpio_pad_select_gpio(ENAS[i]);
+		gpio_set_direction(ENAS[i], GPIO_MODE_OUTPUT);
 	}
 
-	const esp_timer_create_args_t timer_args = {
-            .callback = &doStep,
-            /* name is optional, but may help identify the timer when debugging */
-            .name = "periodic"
-    };
-	esp_timer_handle_t timer;
-	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer));
-	ESP_ERROR_CHECK(esp_timer_start_periodic(timer, STEP_DELAY));
-
-	stepper = 0;
-	acceleration = 1;
+	setupRMT();
 
     //Initialize SPI slave interface
     ret=spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, DMA_CHAN);
@@ -263,8 +271,62 @@ void app_main(void)
 		}
         //motorMove(1000,1500,1200,3000);
     }
-	esp_timer_delete(timer);
 
+}
+
+void setupRMT() {
+	// Configure RMT channels
+	for(int i = 0; i < MOTOR_NUM; i++) {
+		const rmt_config_t rmt_config_object = {
+			.rmt_mode  = RMT_MODE_TX,
+			.channel = rmt_channels[i],
+			.gpio_num = STEPS[i],
+			.mem_block_num = 1,
+			.tx_config.loop_en = 0,
+			.tx_config.carrier_en = 0,
+			.tx_config.idle_output_en = 1,
+			.tx_config.idle_level = RMT_IDLE_LEVEL_LOW,
+			.tx_config.carrier_level = RMT_CARRIER_LEVEL_HIGH,
+			.clk_div = 80
+		};
+		ESP_ERROR_CHECK(rmt_config(&rmt_config_object));
+		//rmt_set_tx_intr_en(rmt_config_object.channel, 1);
+		rmt_driver_install(rmt_config_object.channel, 0, 0);
+	}
+
+	full_pulses[0].duration0 = 10;
+	full_pulses[0].level0 = 1;
+	full_pulses[0].duration1 = 10;
+	full_pulses[0].level1 = 0;
+
+	empty_pulses[0].duration0 = 100;
+	empty_pulses[0].level0 = 0;
+	empty_pulses[0].duration1 = 100;
+	empty_pulses[0].level1 = 0;
+
+	for(int i = 0; i < MOTOR_NUM; i++) {
+		rmt_write_items(rmt_channels[i], empty_pulses, 1, 0);
+	}
+
+	int acc = ACCELERATION;
+	int addition = 0;
+	for(int i = 0; i < RAMP_SIZE; i++) {
+		ramp_up_pulses[i].duration0 = DELAY_MAX - addition;
+		ramp_up_pulses[i].level0 = 1;
+		ramp_up_pulses[i].duration1 = 10;
+		ramp_up_pulses[i].level1 = 0;
+
+		ramp_down_pulses[i].duration0 = DELAY_MIN + addition;
+		ramp_down_pulses[i].level0 = 1;
+		ramp_down_pulses[i].duration1 = 10;
+		ramp_down_pulses[i].level1 = 0;
+
+		acc--;
+		if(acc <= 0) {
+			acc = ACCELERATION;
+			addition++;
+		}
+	}
 }
 
 /**
@@ -281,43 +343,53 @@ void handleCommand(char* buffer) {
 		current_byte += 2;
 		double radians = (double) decodeFloat(buffer, current_byte);
 		int steps = (int) radians;
-		printf("Received Motor Radians: %d %f\n", index, radians);
+		current_byte += 4;
+		int delay = 100;//(int) decodeInt16(buffer, current_byte);
+
+		printf("Received Motor Position: %d %f %d\n", index, radians, delay);
 		motor_setpoints[index] = steps;
 		motor_differents[index] = abs(motor_setpoints[index] - motor_positions[index]);
-	}
-}
 
-static void doStep(void* arg) {
-	for(int index = 0; index < MOTOR_NUM; index++) {
-		if(acceleration != 0 && motor_positions[index] != motor_setpoints[index]) {
-			stepper++;
-			if (motor_positions[index] > motor_setpoints[index]){
-				gpio_set_level(DIRS[index], LOW);
-				gpio_set_level(STEPS[index], stepper % 2);
-				if(stepper % 2) {
-					motor_positions[index] -= 1;
-				}
-		 	} else if (motor_positions[index] < motor_setpoints[index]){
-				gpio_set_level(DIRS[index], HIGH);
-				gpio_set_level(STEPS[index], stepper % 2);
-				if(stepper % 2) {
-					motor_positions[index] += 1;
-				}
-		    }
-			acceleration--;
-		} else if(motor_positions[index] != motor_setpoints[index]) {
-			int64_t difference = abs(motor_setpoints[index] - motor_positions[index]);
-			if(difference <= motor_differents[index] / 2) {
-				float ratio = (0.0 + difference) / (motor_differents[index] / 2);
-				acceleration = round(ratio * ACC_MAX + 0.5);
-			} else {
-				float ratio = (0.0 + difference - (motor_differents[index] / 2)) / (motor_differents[index] / 2);
-				acceleration = round(ACC_MAX - (ratio * ACC_MAX) + 0.5);
-			}
-		} else {
-		   gpio_set_level(STEPS[index], LOW);
-	   }
-   }
+		if(motor_differents[index] == 0) {
+			return;
+		}
+
+		gpio_set_level(ENAS[index], LOW);
+
+		// Set direction pin
+		if (motor_positions[index] > motor_setpoints[index]) {
+			gpio_set_level(DIRS[index], LOW);
+		} else if (motor_positions[index] < motor_setpoints[index]){
+			gpio_set_level(DIRS[index], HIGH);
+		}
+
+		// Limit Delay
+		delay = delay < DELAY_MIN ? DELAY_MIN : delay;
+		delay = delay > DELAY_MAX ? DELAY_MAX : delay;
+
+		// Copy the ramp up Buffer
+		int ramp_steps = RAMP_SIZE;
+		if(delay > DELAY_MIN) {
+			ramp_steps = (DELAY_MAX - delay) * ACCELERATION;
+		}
+		if(motor_differents[index] < ramp_steps * 2) {
+			ramp_steps = motor_differents[index] / 2;
+		}
+		overwriteItems(pulses, 0, ramp_up_pulses, 0, ramp_steps);
+		overwriteItems(pulses, motor_differents[index] - ramp_steps, ramp_down_pulses, RAMP_SIZE - ramp_steps, ramp_steps);
+
+		// Set Middle Pulses
+		for(int i = ramp_steps; i < motor_differents[index] - ramp_steps; i++) {
+			overwriteItems(pulses, i, full_pulses, 0, 1);
+			pulses[i].duration0 = delay;
+		}
+		overwriteItems(pulses, motor_differents[index], empty_pulses, 0, 1);
+
+		// Sent Pulses
+		rmt_write_items(rmt_channels[index], pulses, motor_differents[index], 0);
+		//rmt_isr_register(&handleENA, &index, ESP_INTR_FLAG_LOWMED, NULL);
+		motor_positions[index] = steps;
+	}
 }
 
 /**
@@ -373,13 +445,27 @@ bool findCommand(char* buffer) {
 			}
 		}
 	}
-	printf("%d\n", current);
+
 	if(current == 2) {
 		overwriteBytes(buffer, 0, buf, patterns[0] + lengths[0],
 			patterns[1] - patterns[0] - lengths[0]);
 		return true;
 	}
 	return false;
+}
+
+void handleENA(void* index) {
+	int ind = (int) &index;
+	gpio_set_level(ENAS[ind], HIGH);
+}
+
+void overwriteItems(rmt_item32_t* pulses, size_t start, rmt_item32_t* pulses_inc, size_t inc_start, size_t steps) {
+	for(int i = 0; i < steps; i++) {
+		pulses[start + i].duration0 = pulses_inc[inc_start + i].duration0;
+		pulses[start + i].level0 = pulses_inc[inc_start + i].level0;
+		pulses[start + i].duration1 = pulses_inc[inc_start + i].duration1;
+		pulses[start + i].level1 = pulses_inc[inc_start + i].level1;
+	}
 }
 
 /**
