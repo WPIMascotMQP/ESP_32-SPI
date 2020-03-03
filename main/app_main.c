@@ -32,6 +32,7 @@
 #include "driver/spi_slave.h"
 #include "esp_log.h"
 #include "esp_spi_flash.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "driver/rmt.h"
 
@@ -68,7 +69,6 @@ Pins in use. The SPI Master can use the GPIO mux, so feel free to change these i
 
 #endif
 
-#define STEP_DELAY 75
 #define LOW 0
 #define HIGH 1
 #define STEPS_PER_ROTATION 6400
@@ -91,7 +91,16 @@ enum flags {
 // Holds the hex representation of each command
 enum cmds {
 	PATTERN = 0xFF,
+	ESTOP = 0x00,
 	MOTORPOSITION = 0x01,
+	REQUESTCMD = 0x02,
+	HANDSHAKE = 0x03,
+
+	TOUCHINFO = 0x10,
+	AUDIOINFO = 0x11,
+
+	MOTORDISABLE = 0x20,
+	MOTORENABLE = 0x21,
 };
 
 // Holds the byte index for different parts of the commmand
@@ -123,15 +132,17 @@ void handleCommand(char* buffer);
 bool findCommand(char* buffer);
 char* getStringHex(char* buffer, char* output, size_t length);
 
-void handleENA(void* index);
+void requestCMD(void* arg);
 void overwriteItems(rmt_item32_t* pulses, size_t start, rmt_item32_t* pulses_inc, size_t inc_start, size_t steps);
 
 size_t overwriteBytes(char* buffer, size_t byte_start, char* buf, size_t inc_start, size_t byte_inc);
 size_t encodePattern(char* buffer, size_t byte_start);
+size_t encodeInt8(char* buffer, size_t byte_start, int8_t num);
 size_t encodeInt16(char* buffer, size_t byte_start, int16_t num);
 size_t encodeInt32(char* buffer, size_t byte_start, int32_t num);
 size_t encodeFloat(char* buffer, size_t byte_start, float num);
 
+int8_t decodeInt8(char* buffer, size_t byte_start);
 int16_t decodeInt16(char* buffer, size_t byte_start);
 int32_t decodeInt32(char* buffer, size_t byte_start);
 float decodeFloat(char* buffer, size_t byte_start);
@@ -144,8 +155,8 @@ DMA_ATTR int64_t motor_positions[4];
 DMA_ATTR int64_t motor_setpoints[4];
 DMA_ATTR int64_t motor_differents[4];
 
-DMA_ATTR gpio_num_t STEPS[4] = {GPIO_NUM_32, GPIO_NUM_25, GPIO_NUM_5, GPIO_NUM_16};
-DMA_ATTR gpio_num_t DIRS[4] = {GPIO_NUM_33, GPIO_NUM_33, GPIO_NUM_17, GPIO_NUM_4};
+DMA_ATTR gpio_num_t STEPS[4] = { GPIO_NUM_5, GPIO_NUM_16, GPIO_NUM_26, GPIO_NUM_25}; //{GPIO_NUM_26, GPIO_NUM_25, GPIO_NUM_5, GPIO_NUM_16};
+DMA_ATTR gpio_num_t DIRS[4] = { GPIO_NUM_17, GPIO_NUM_4, GPIO_NUM_33, GPIO_NUM_32}; //{GPIO_NUM_33, GPIO_NUM_32, GPIO_NUM_17, GPIO_NUM_4};
 DMA_ATTR gpio_num_t ENAS[4] = {GPIO_NUM_33, GPIO_NUM_33, GPIO_NUM_17, GPIO_NUM_4};
 
 static int64_t MAX_STEPS = STEPS_PER_ROTATION * 10;
@@ -164,6 +175,7 @@ rmt_channel_t rmt_channels[4] = {RMT_CHANNEL_0, RMT_CHANNEL_1, RMT_CHANNEL_2, RM
 DMA_ATTR char sendbuf[65] = "";
 DMA_ATTR char recvbuf[65] = "";
 DMA_ATTR char outputbuf[65] = "";
+DMA_ATTR int requestCommand = 0;
 
 //Main application
 void app_main(void)
@@ -231,6 +243,8 @@ void app_main(void)
 
 	srand(time(NULL));
 
+	int current_motor = 0;
+
     while(1) {
         //Clear receive buffer, set send buffer to something sane
         memset(recvbuf, 0x00, BUFFER_SIZE);
@@ -238,15 +252,21 @@ void app_main(void)
 
 		size_t current_byte = 0;
 		current_byte += encodePattern(sendbuf, current_byte);
-		sendbuf[current_byte++] = 0x00;
-		sendbuf[current_byte++] = MOTORPOSITION;
-		int index = rand() % 20;
-		float radians = (rand() % 12800) + ((0.0 + rand() % 100) / 100000);
-		current_byte += encodeInt16(sendbuf, current_byte, index);
-        current_byte += encodeFloat(sendbuf, current_byte, radians);
+		if(!requestCommand) {
+			sendbuf[current_byte++] = 0x00;
+			sendbuf[current_byte++] = MOTORPOSITION;
+			current_byte += encodeInt8(sendbuf, current_byte, current_motor);
+			current_byte += encodeInt32(sendbuf, current_byte, motor_positions[current_motor]);
+			printf("Sending Position: %d %lld\n", current_motor, motor_positions[current_motor]);
+		} else {
+			sendbuf[current_byte++] = 0x00;
+			sendbuf[current_byte++] = REQUESTCMD;
+			printf("Requesting New Command\n");
+			requestCommand = 0;
+		}
         current_byte += encodePattern(sendbuf, current_byte);
 
-		printf("Sending Position: %d %f\n", index, radians);
+
 		printf("Sending: %s\n", getStringHex(sendbuf, outputbuf, BUFFER_SIZE));
 
         //Set up a transaction of 128 bytes to send/receive
@@ -270,6 +290,10 @@ void app_main(void)
 			handleCommand(recvbuf);
 		}
         //motorMove(1000,1500,1200,3000);
+		current_motor++;
+		if(current_motor >= MOTOR_NUM) {
+			current_motor = 0;
+		}
     }
 
 }
@@ -339,14 +363,13 @@ void handleCommand(char* buffer) {
 	if(buffer[cmd_byte] == MOTORPOSITION) {
 		// If command is the current motor position
 		size_t current_byte = 2;
-		int index = (int) decodeInt16(buffer, current_byte);
-		current_byte += 2;
-		double radians = (double) decodeFloat(buffer, current_byte);
-		int steps = (int) radians;
+		int index = (int) decodeInt8(buffer, current_byte);
+		current_byte += 1;
+		int steps = (int) decodeInt32(buffer, current_byte);
 		current_byte += 4;
 		int delay = 100;//(int) decodeInt16(buffer, current_byte);
 
-		printf("Received Motor Position: %d %f %d\n", index, radians, delay);
+		printf("Received Motor Position: %d %d %d\n", index, steps, delay);
 		motor_setpoints[index] = steps;
 		motor_differents[index] = abs(motor_setpoints[index] - motor_positions[index]);
 
@@ -389,6 +412,15 @@ void handleCommand(char* buffer) {
 		rmt_write_items(rmt_channels[index], pulses, motor_differents[index], 0);
 		//rmt_isr_register(&handleENA, &index, ESP_INTR_FLAG_LOWMED, NULL);
 		motor_positions[index] = steps;
+
+		const esp_timer_create_args_t timer_args = {
+            .callback = &requestCMD,
+            /* name is optional, but may help identify the timer when debugging */
+            .name = "requestCMD"
+	    };
+		esp_timer_handle_t timer;
+		ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer));
+		ESP_ERROR_CHECK(esp_timer_start_once(timer, delay * motor_differents[index]));
 	}
 }
 
@@ -454,9 +486,8 @@ bool findCommand(char* buffer) {
 	return false;
 }
 
-void handleENA(void* index) {
-	int ind = (int) &index;
-	gpio_set_level(ENAS[ind], HIGH);
+void requestCMD(void* arg) {
+	requestCommand = 1;
 }
 
 void overwriteItems(rmt_item32_t* pulses, size_t start, rmt_item32_t* pulses_inc, size_t inc_start, size_t steps) {
@@ -523,6 +554,18 @@ size_t encodePattern(char* buffer, size_t byte_start) {
 }
 
 /**
+ Encodes a 8 bit int into the given buffer
+ @param buffer The buffer to write into
+ @param byte_start The starting byte to write into
+ @param num The 8 bit int to encode
+ @return The number of bytes encoded
+ */
+size_t encodeInt8(char* buffer, size_t byte_start, int8_t num) {
+	buffer[byte_start + 0] = num & 0xFF;
+	return sizeof(int8_t);
+}
+
+/**
  Encodes a 16 bit int into the given buffer
  @param buffer The buffer to write into
  @param byte_start The starting byte to write into
@@ -564,6 +607,20 @@ size_t encodeFloat(char* buffer, size_t byte_start, float num) {
 	buffer[byte_start + 2] = (number >> 8) & 0xFF;
 	buffer[byte_start + 3] = number & 0xFF;
 	return sizeof(float);
+}
+
+/**
+ Decodes a 8 bit int from given buffer
+ @param buffer The buffer to read from
+ @param byte_start The starting byte to read from
+ @return The 8 bit int decoded
+ */
+int8_t decodeInt8(char* buffer, size_t byte_start) {
+	WORD_ALIGNED_ATTR char buf[1];
+	buf[0] = buffer[byte_start + 0];
+	int8_t number = *(int8_t*) &buf;
+
+	return number;
 }
 
 /**
